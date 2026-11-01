@@ -1,0 +1,28 @@
+# Template: replace domain, secret and certificate paths before running.
+listening-port=3478
+tls-listening-port=5349
+fingerprint
+use-auth-secret
+static-auth-secret=SUBSTITUA_PELO_MESMO_TURN_SECRET_DO_BACKEND
+realm=turn.seudominio.com
+server-name=turn.seudominio.com
+cert=/etc/letsencrypt/live/turn.seudominio.com/fullchain.pem
+pkey=/etc/letsencrypt/live/turn.seudominio.com/privkey.pem
+min-port=49160
+max-port=49200
+user-quota=8
+total-quota=32
+no-multicast-peers
+no-cli
+no-tlsv1
+no-tlsv1_1
+denied-peer-ip=0.0.0.0-0.255.255.255
+denied-peer-ip=10.0.0.0-10.255.255.255
+denied-peer-ip=127.0.0.0-127.255.255.255
+denied-peer-ip=169.254.0.0-169.254.255.255
+denied-peer-ip=172.16.0.0-172.31.255.255
+denied-peer-ip=192.168.0.0-192.168.255.255
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# If behind NAT, set external-ip=PUBLIC_IP/PRIVATE_IP and configure port forwarding.

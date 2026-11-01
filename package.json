@@ -1,0 +1,1 @@
+{"name":"dd-voz-tela","version":"1.0.0","private":true,"type":"module","engines":{"node":">=22.9"},"scripts":{"start":"node --env-file-if-exists=.env server.mjs","build":"node scripts/build-static.mjs","test":"node --test test/*.test.mjs","check":"node --check server.mjs && node --check public/app.js"},"dependencies":{"ws":"8.21.0"}}
