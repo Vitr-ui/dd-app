@@ -186,7 +186,7 @@ function connectSocket(create, target) {
     if (msg.type === 'error') { report(new Error(msg.message)); if (connecting) leave(false); return; }
     if (msg.type === 'joined') {
       roomId = msg.room; myId = msg.id; token = msg.token; safeSession(`duo-token-${roomId}`, token);
-      rtcConfig = { iceServers: msg.iceServers, iceTransportPolicy: settings.relay ? 'relay' : 'all' };
+      rtcConfig = { iceServers: msg.iceServers, iceTransportPolicy: settings.relay ? 'relay' : 'all', bundlePolicy: 'max-bundle' };
       if (settings.relay && !msg.turnConfigured) { toast('O modo somente TURN precisa de um servidor TURN configurado. Desative-o para tentar conexão direta.'); leave(false); return; }
       $('turn-status').textContent = msg.turnConfigured ? 'TURN configurado. Credenciais temporárias recebidas do servidor.' : 'Sem TURN configurado. Conexões entre algumas redes poderão falhar.';
       connecting = false; reconnectAttempt = 0; clearTimeout(reconnectTimer); lastState = '';
@@ -203,7 +203,7 @@ function connectSocket(create, target) {
       else if (other.id !== peerId || !pc) { createPeer(other.id).catch(report); }
       updateStage(); return;
     }
-    if (msg.type === 'signal') { signalQueue = signalQueue.then(() => receiveSignal(msg)).catch(report); return; }
+    if (msg.type === 'signal') { const generation = connGeneration; signalQueue = signalQueue.then(() => generation === connGeneration ? receiveSignal(msg) : undefined).catch(report); return; }
     if (msg.type === 'chat') addMessage(msg);
   };
   socket.onclose = e => {
@@ -236,15 +236,10 @@ async function localDescription(connection) {
 }
 async function createPeer(otherId) {
   destroyPeer(); peerId = otherId; const connection = new RTCPeerConnection(rtcConfig); pc = connection;
-  const tracks = [micOutput?.getAudioTracks()[0], displayStream?.getAudioTracks()[0], displayStream?.getVideoTracks()[0]];
-  ['voice', 'screenAudio', 'video'].forEach((kind, i) => {
-    const transceiver = connection.addTransceiver(tracks[i] || (i === 2 ? 'video' : 'audio'), { direction: 'sendrecv', streams: [i === 0 ? micOutput : displayStream].filter(Boolean) });
-    senders[kind] = transceiver.sender;
-    if (i < 2 && transceiver.setCodecPreferences && RTCRtpReceiver.getCapabilities) {
-      const codecs = RTCRtpReceiver.getCapabilities('audio')?.codecs || [], opus = codecs.filter(c => c.mimeType.toLowerCase() === 'audio/opus');
-      if (opus.length) transceiver.setCodecPreferences(opus);
-    }
-  });
+  // Only the offerer creates media sections. The answerer binds its tracks to
+  // the sections created by setRemoteDescription, preserving mids and DTLS roles.
+  if (myId < otherId) await bindMedia(connection, true);
+  if (pc !== connection) return;
   connection.onicecandidate = e => { if (pc === connection) send({ type: 'signal', data: { candidate: e.candidate?.toJSON() || null } }); };
   connection.ontrack = e => {
     if (pc !== connection) return;
@@ -254,21 +249,44 @@ async function createPeer(otherId) {
   };
   connection.onconnectionstatechange = () => {
     if (pc !== connection) return;
-    const names = { new: 'Conectando…', connecting: 'Conectando…', connected: 'Conectados', disconnected: 'Reconectando mídia…', failed: 'Falha de conexão · verifique TURN', closed: 'Desconectado' };
+    const names = { new: 'Conectando…', connecting: 'Conectando…', connected: 'Conectados', disconnected: 'Reconectando mídia…', failed: 'Falha de conexão · tentando novamente', closed: 'Desconectado' };
     setStatus(names[connection.connectionState]); if (connection.connectionState === 'connected') applySendParameters().catch(report);
-    if (connection.connectionState === 'failed') { connection.restartIce(); negotiate(connection).catch(report); }
+    if (connection.connectionState === 'failed') {
+      if (myId < peerId) { connection.restartIce(); negotiate(connection).catch(report); }
+      else send({ type: 'signal', data: { restart: true } });
+    }
   };
   if (myId < otherId) await negotiate(connection);
 }
+async function bindMedia(connection, create = false) {
+  const tracks = [micOutput?.getAudioTracks()[0], displayStream?.getAudioTracks()[0], displayStream?.getVideoTracks()[0]];
+  const kinds = ['voice', 'screenAudio', 'video'];
+  for (const [i, kind] of kinds.entries()) {
+    if (pc !== connection) return;
+    const streams = [i === 0 ? micOutput : displayStream].filter(Boolean);
+    const transceiver = create ? connection.addTransceiver(tracks[i] || (i === 2 ? 'video' : 'audio'), { direction: 'sendrecv', streams }) : connection.getTransceivers()[i];
+    if (!transceiver) throw Error('A chamada recebeu uma configuração de mídia incompatível. Atualize o dd nos dois dispositivos.');
+    transceiver.direction = 'sendrecv';
+    if (!create) { await transceiver.sender.replaceTrack(tracks[i] || null); transceiver.sender.setStreams(...streams); }
+    senders[kind] = transceiver.sender;
+    if (i < 2 && transceiver.setCodecPreferences && RTCRtpReceiver.getCapabilities) {
+      const codecs = RTCRtpReceiver.getCapabilities('audio')?.codecs || [], opus = codecs.filter(c => c.mimeType.toLowerCase() === 'audio/opus');
+      if (opus.length) transceiver.setCodecPreferences(opus);
+    }
+  }
+}
 async function negotiate(connection) {
-  if (connection !== pc || makingOffer || connection.signalingState !== 'stable') return;
+  if (connection !== pc || myId >= peerId || makingOffer || connection.signalingState !== 'stable') return;
   try { makingOffer = true; await localDescription(connection); if (connection === pc) send({ type: 'signal', data: { description: connection.localDescription } }); }
   finally { makingOffer = false; }
 }
 async function receiveSignal(msg) {
   if (msg.from !== peerId || !pc) return;
   const connection = pc, data = msg.data;
+  if (data.restart) { if (myId < peerId) { connection.restartIce(); await negotiate(connection); } return; }
   if (data.description) {
+    if (data.description.type === 'offer' && myId < peerId) return;
+    if (data.description.type === 'answer' && connection.signalingState !== 'have-local-offer') return;
     const d = data.description, ready = !makingOffer && (connection.signalingState === 'stable' || settingAnswer);
     const collision = d.type === 'offer' && !ready;
     ignoreOffer = myId < peerId && collision; if (ignoreOffer) return;
@@ -276,7 +294,7 @@ async function receiveSignal(msg) {
     try { await connection.setRemoteDescription(d); } finally { settingAnswer = false; }
     if (connection !== pc) return;
     for (const candidate of pendingCandidates.splice(0)) await connection.addIceCandidate(candidate);
-    if (d.type === 'offer') { await localDescription(connection); send({ type: 'signal', data: { description: connection.localDescription } }); }
+    if (d.type === 'offer') { await bindMedia(connection); if (connection !== pc) return; await localDescription(connection); if (connection === pc) send({ type: 'signal', data: { description: connection.localDescription } }); }
     await applySendParameters();
   } else if ('candidate' in data && !ignoreOffer) {
     if (!connection.remoteDescription) pendingCandidates.push(data.candidate); else await connection.addIceCandidate(data.candidate);
@@ -429,3 +447,4 @@ const incoming = new URLSearchParams(location.hash.slice(1)).get('sala'); if (in
 $('nickname').value = settings.nickname; fillForm(); capabilities(); volumes(); updateStage();
 $('server-notice').hidden = !!settings.server || ['localhost', '127.0.0.1'].includes(location.hostname);
 if (!settings.server && !$('server-notice').hidden) fetch('/health').then(r => r.ok ? r.json() : null).then(data => { if (data?.ok === true) $('server-notice').hidden = true; }).catch(() => {});
+
